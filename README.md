@@ -30,7 +30,7 @@ driving the same pages you'd click.
 
 ```bash
 # the whole tool is one file
-curl -L -o giveblood.mjs <RAW-URL-OF-scripts/giveblood.mjs>
+curl -L -o giveblood.mjs https://raw.githubusercontent.com/kenibarwick/giveblood-booking/main/scripts/giveblood.mjs
 chmod +x giveblood.mjs
 ```
 
