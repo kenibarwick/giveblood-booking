@@ -43,6 +43,17 @@ const BASE = 'https://my.blood.co.uk';
 const LOGIN_URL = `${BASE}/your-account/login`;
 const APPTS_URL = `${BASE}/your-account/appointments`;
 const HOME_TOWN = process.env.GIVEBLOOD_HOME_TOWN || 'Bedford';   // user's nearest-location variable
+const deferralDays = () => parseInt(process.env.GIVEBLOOD_DEFERRAL_DAYS || '84', 10);   // men 84 / women 112 (lazy: env/.env loaded first)
+
+const MONTH_ID = { january:0, february:1, march:2, april:3, may:4, june:5, july:6, august:7, september:8, october:9, november:10, december:11 };
+function parseUKDate(s) {   // "Monday 2 November 2026" -> Date
+  const m = /[A-Za-z]+\s+(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/.exec(s || '');
+  if (!m) return null;
+  const mon = MONTH_ID[m[2].toLowerCase()];
+  if (mon === undefined) return null;
+  return new Date(Date.UTC(+m[3], mon, +m[1]));
+}
+const iso = (d) => d ? d.toISOString().slice(0, 10) : '';
 
 const JSON_OUT = process.argv.includes('--json');
 
@@ -326,6 +337,54 @@ async function main() {
         tooClose: /too close together|replace your existing/i.test(body),
       };
     },
+    async currentAppointment() {
+      await utils.gotoAuthed(APPTS_URL);
+      let body = '';
+      for (let i = 0; i < 8; i++) {
+        await page.waitForTimeout(600);
+        body = await page.evaluate(() => document.body ? document.body.innerText : '');
+        if (/[A-Za-z]+ \d{1,2} [A-Za-z]+ \d{4}|appointments?|November|book/i.test(body) && body.length > 200) break;
+      }
+      if (process.env.GIVEBLOOD_DEBUG) console.error('APPT_PAGE=' + JSON.stringify({ url: page.url(), body: body.slice(0, 1200) }));
+      const dates = [...new Set([...body.matchAll(/[A-Za-z]+ \d{1,2} [A-Za-z]+ \d{4}/g)].map(m => m[0]))];
+      let best = null, bestD = Infinity;
+      for (const d of dates) { const t = parseUKDate(d); if (t && t.getTime() < bestD) { best = d; bestD = t.getTime(); } }
+      const timeM = /(\d{1,2}:\d{2}(?:am|pm))/i.exec(body);
+      return { date: best, time: timeM ? timeM[1].toLowerCase() : '', body: body.slice(0, 700) };
+    },
+    async topSlots(town, afterDate, n) {
+      // top-n earliest (date, time) slots at the nearest venue, on/after afterDate
+      afterDate = afterDate || null;
+      n = n || 3;
+      await utils.gotoAuthed(APPTS_URL);
+      await utils.gotoAuthed(BASE + '/your-account/appointments/book/search/');
+      await page.locator('input[name="searchCriteria"], input[type="text"]').first().fill(town);
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(1500);
+      if (page.url().includes('location-results')) {
+        const m = page.locator('a[href*="donation-venues"]').last();
+        if (await m.count()) { await m.click(); await page.waitForTimeout(700); }
+      }
+      await page.waitForTimeout(1200);
+      const vCard = page.locator('a[href*="choose-date"]').first();
+      if (await vCard.count()) { await vCard.click(); await page.waitForTimeout(2400); }
+      const dayLinks = page.locator('a[href*="choose-appointment"]');
+      const total = await dayLinks.count();
+      const out = [];
+      for (let i = 0; i < total && out.length < n; i++) {
+        const label = (await dayLinks.nth(i).innerText()).replace(/\s+/g, ' ').trim();
+        const dt = parseUKDate(label);
+        let dLabel = label;
+        if (dt && afterDate && dt.getTime() < afterDate.getTime()) continue;
+        // read the date's earliest time without leaving the page: grab the sessionTime from href
+        let href = await dayLinks.nth(i).getAttribute('href').catch(() => null);
+        let time = '';
+        const st = /sessionTime=([A-Za-z 0-9:]+)/.exec(href || '');
+        if (st) { const h = st[1]; time = `${h.slice(-4).slice(0,2)}:${h.slice(-2)}`; }
+        out.push({ date: label, time });
+      }
+      return out;
+    },
     async toTimes(town, venueRe, dateRe) {
       await utils.autoLoginGoto(APPTS_URL);   // bootstrap SPA shell
       await utils.autoLoginGoto(BASE + '/your-account/appointments/book/search/');
@@ -414,13 +473,47 @@ async function main() {
           const finalUrl = page.url();
           const finalBody = await page.evaluate(() => document.body ? document.body.innerText : '').catch(() => '');
           const ok = /confirmation|booked|confirmed/i.test(finalBody) && !/Login|error/i.test(finalUrl);
-          console.log(clicked
-            ? (ok ? 'BOOKED ✓ — ' + finalUrl : 'Clicked confirm; landed on ' + finalUrl + ' — verify outcome.')
-            : 'Could not find the confirm button on the review screen.');
-          console.log((finalBody || '').slice(0, 500));
-        }
-      }
-    }
+                  console.log(clicked
+                    ? (ok ? 'BOOKED ✓ — ' + finalUrl : 'Clicked confirm; landed on ' + finalUrl + ' — verify outcome.')
+                    : 'Could not find the confirm button on the review screen.');
+                  console.log((finalBody || '').slice(0, 500));
+                }
+              }
+            }
+
+            else if (cmd === 'next') {
+              // current appointment -> deferral expiry -> top-3 eligible (date,time) at the nearest venue
+              const town = process.argv[3] || process.env.GIVEBLOOD_HOME_TOWN || HOME_TOWN;
+              const ca = await utils.currentAppointment();
+              const apptDate = parseUKDate(ca.date);
+              const dur = deferralDays();
+              const eligible = apptDate ? new Date(apptDate.getTime() + dur * 86400000) : null;
+              if (!apptDate) {
+                console.log('Could not read your current appointment from the portal. Re-run `giveblood login` and try again.');
+                if (!JSON_OUT) console.log((ca.body || '').slice(0, 300));
+              } else {
+                const venues = await utils.searchVenues(town);
+                venues.sort((a, b) => a.distance - b.distance);
+                const nearest = venues[0];
+                const lines = [];
+                lines.push(`Current appointment : ${ca.date}${ca.time ? ' ' + ca.time : ''}`);
+                lines.push(`Deferral (${dur} days) : you can next give blood from ${eligible.toISOString().slice(0, 10)}`);
+                if (nearest) {
+                  const d = await utils.drillVenueDates(town, nearest.name);
+                  const top = d.dates
+                    .map(x => ({ ...x, dt: parseUKDate(x.label) }))
+                    .filter(x => x.dt && eligible && x.dt.getTime() >= eligible.getTime())
+                    .slice(0, 3);
+                  lines.push(`Nearest venue (${nearest.name}, ${nearest.distance} mi) — earliest eligible slots:`);
+                  if (top.length === 0) lines.push('  (no dates on/after your eligible date were returned)');
+                  for (const [i, s] of top.entries()) lines.push(`  ${['1.','2.','3.'][i]} ${s.label}`);
+                  const firstTimes = d.times && d.times.length ? d.times.slice(0, 3).join(', ') : '';
+                  if (top[0] && firstTimes) lines.push(`Times available on ${top[0].label}: ${firstTimes}`);
+                }
+                if (JSON_OUT) process.stdout.write(JSON.stringify({ town, current: ca.date, deferralDays: dur, eligible: iso(eligible), nearest: nearest && nearest.name }, null, 2) + '\n');
+                else console.log(lines.join('\n'));
+              }
+            }
 
   else if (cmd === 'status' || cmd === 'check' || cmd === 'book' || cmd === 'next' || cmd === 'debug-dump' || cmd === 'walk-book' || cmd === 'probe' || cmd === 'venue' || cmd === 'cscreen' || cmd === 'review') {
     if (cmd === 'probe') await utils.gotoAuthed(BASE + (process.env.GB_ROUTE || '/your-account/appointments/book/'));

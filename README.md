@@ -43,11 +43,13 @@ Edit `~/.config/giveblood/.env` with your donor login:
 GIVEBLOOD_EMAIL=you@example.com
 GIVEBLOOD_PASSWORD=********
 GIVEBLOOD_HOME_TOWN=Bedford
+GIVEBLOOD_DEFERRAL_DAYS=84
 ```
 - `GIVEBLOOD_PASSWORD` is read at runtime and **never stored or echoed** by the script —
   only the revocable session cookie is persisted.
 - `GIVEBLOOD_HOME_TOWN` is your nearest-location variable (used when you call `check`/`book`
   with no town argument).
+- `GIVEBLOOD_DEFERRAL_DAYS` is the NHS deferral between donations — **84 for men, 112 for women**.
 
 ## Usage
 
@@ -55,6 +57,7 @@ GIVEBLOOD_HOME_TOWN=Bedford
 node giveblood.mjs login          # one-time; persists ~30-day session
 node giveblood.mjs check          # venues near GIVEBLOOD_HOME_TOWN, nearest first + dates/times
 node giveblood.mjs check "Leeds"  # or any town/postcode
+node giveblood.mjs next           # current appointment -> deferral expiry -> top-3 earliest eligible slots
 node giveblood.mjs book           # dry-run to the confirm screen (SAFE, doesn't book)
 node giveblood.mjs book --confirm # actually books the shown time (REAL change to a live account)
 ```
@@ -94,6 +97,8 @@ Commands:
   login              authenticate once (creates the session; run if logged out)
   check [town]       venues near GIVEBLOOD_HOME_TOWN (or the given town), nearest first,
                      then the nearest venue's dates + opening hours + available times
+  next               current appointment -> deferral expiry (GIVEBLOOD_DEFERRAL_DAYS) ->
+                     top-3 earliest eligible slots
   book [town]        dry-run: walks the booking wizard to the confirm screen and reports the
                      New vs Existing appointment — DOES NOT book
   book --confirm     actually books the shown time — a REAL change to the user's live
