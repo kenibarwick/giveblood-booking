@@ -1,4 +1,4 @@
-# giveblood-booking
+# Give Blood booking
 
 Automated NHS Give Blood appointment **checking and booking** — a single dependency-free
 Node script that drives `my.blood.co.uk` with headless Chromium. Token-lean (zero LLM tokens
