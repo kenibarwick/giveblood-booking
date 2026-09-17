@@ -1,0 +1,8 @@
+# nodes
+node_modules
+# secrets — never commit
+giveblood.env
+.env
+profile/
+*.env
+!README.md
