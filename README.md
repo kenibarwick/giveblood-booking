@@ -124,6 +124,16 @@ Cron example (hourly; every tick that has nothing to say prints nothing):
 
 `GIVEBLOOD_NUDGE_NO_READ=1` trusts the cached state and skips the portal read (offline/testing).
 
+## Verify it yourself
+
+`scripts/manual-test.sh` runs the read-only acceptance check — `status`, `check`, `next`,
+`book` (dry-run) — with a per-step PASS/FAIL table and an eyeball checklist to compare
+against the live portal. Step 5 (`book --confirm`) is printed but **never executed**.
+
+```bash
+bash scripts/manual-test.sh          # uses GIVEBLOOD_HOME_TOWN (default Bedford)
+```
+
 ## Give this prompt to any coding agent
 
 Copy the block below into your coding agent (Hermes, Claude Code, opencode, Codex, …).
