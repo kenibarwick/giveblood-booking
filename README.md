@@ -32,6 +32,10 @@ driving the same pages you'd click.
 # the whole tool is one file
 curl -L -o giveblood.mjs https://raw.githubusercontent.com/kenibarwick/giveblood-booking/main/scripts/giveblood.mjs
 chmod +x giveblood.mjs
+
+# optional: the "did you give blood?" nudge watchdog, if you want it on a scheduler
+curl -L -o giveblood-nudge.mjs https://raw.githubusercontent.com/kenibarwick/giveblood-booking/main/scripts/giveblood-nudge.mjs
+chmod +x giveblood-nudge.mjs
 ```
 
 Create your **own** secrets file (never share it, never commit it):
@@ -57,6 +61,7 @@ GIVEBLOOD_DEFERRAL_DAYS=84
 node giveblood.mjs login          # one-time; persists ~30-day session
 node giveblood.mjs check          # venues near GIVEBLOOD_HOME_TOWN, nearest first + dates/times
 node giveblood.mjs check "Leeds"  # or any town/postcode
+node giveblood.mjs status         # current appointment + deferral expiry (--json for scripts)
 node giveblood.mjs next           # current appointment -> deferral expiry -> top-3 earliest eligible slots
 node giveblood.mjs book           # dry-run to the confirm screen (SAFE, doesn't book)
 node giveblood.mjs book --confirm # actually books the shown time (REAL change to a live account)
@@ -82,6 +87,43 @@ Earliest date: Monday 26 October 2026
 Available times (earliest date): 12:50pm, 6:45pm, 5pm
 ```
 
+## Donation nudge (the "did you give blood?" watchdog)
+
+`giveblood-nudge.mjs` is a **silent watchdog** for a scheduler (cron/systemd/productivity
+app). It prints nothing unless there is something to say, so if your scheduler delivers
+stdout verbatim, an empty run is a no-op.
+
+- Asks **once**, ~30 minutes after a known appointment has passed
+  (`GIVEBLOOD_NUDGE_AFTER_MIN`, default 30):
+
+  > 🩸 Blood donation nudge
+  > Your donation was Monday 2 November 2026 at 12:55pm.
+  > Did you give blood? Reply y or n.
+
+- The booking stays **human-in-the-loop**: reply yes → show the top-3 earliest slots after
+  the deferral window → pick one → book that exact one. Nothing books unattended (an
+  unattended booker would also have to answer a security-code prompt, which cron cannot).
+- If the portal read keeps failing (session expired), it alerts **once a week**, not every tick.
+- Reads the appointment via `giveblood status --json` and caches it in
+  `~/.config/giveblood/nudge-state.json`, so frequent ticks do **not** hammer the bot-guarded
+  portal. A live read only happens when it matters: no cache, cache older than 7 days, or we
+  have just entered the nudge window.
+
+```bash
+node giveblood-nudge.mjs             # one tick (what the scheduler runs; silent when nothing to say)
+node giveblood-nudge.mjs status      # print the cached state
+node giveblood-nudge.mjs reset       # forget that we asked (re-ask on the next due tick)
+node giveblood-nudge.mjs check       # force a live portal read, print what it parsed
+```
+
+Cron example (hourly; every tick that has nothing to say prints nothing):
+
+```cron
+20 * * * * cd /path/to/tool && /usr/bin/node giveblood-nudge.mjs
+```
+
+`GIVEBLOOD_NUDGE_NO_READ=1` trusts the cached state and skips the portal read (offline/testing).
+
 ## Give this prompt to any coding agent
 
 Copy the block below into your coding agent (Hermes, Claude Code, opencode, Codex, …).
@@ -97,12 +139,20 @@ Commands:
   login              authenticate once (creates the session; run if logged out)
   check [town]       venues near GIVEBLOOD_HOME_TOWN (or the given town), nearest first,
                      then the nearest venue's dates + opening hours + available times
+  status             current appointment (date + time) and the deferral expiry;
+                     --json gives {ok,appointment,time,appointmentISO,deferralDays,eligibleISO}
   next               current appointment -> deferral expiry (GIVEBLOOD_DEFERRAL_DAYS) ->
                      top-3 earliest eligible slots
   book [town]        dry-run: walks the booking wizard to the confirm screen and reports the
                      New vs Existing appointment — DOES NOT book
   book --confirm     actually books the shown time — a REAL change to the user's live
                      NHS appointment; only run with the user's explicit approval
+
+There is also giveblood-nudge.mjs — a silent watchdog meant for a scheduler. It prints
+nothing unless an appointment has passed (then it asks "did you give blood?") or the portal
+read keeps failing. Don't run it interactively unless the user asks; when its question
+reaches you, the follow-up flow is: user says yes -> run `next` -> show the top-3 eligible
+slots -> user picks one -> `book --confirm` that exact slot.
 
 The user's own credentials live in ~/.config/giveblood/.env (chmod 600):
   GIVEBLOOD_EMAIL=...
@@ -134,7 +184,16 @@ RULES:
 - The booking SPA is bot-guarded and sometimes renders an empty/collapsed shell
   (Queue-it/hydration). The tool retries the bootstrap and expands the accordions; a rare
   run needs a re-`login` then retry.
-- Sessions last ~30 days; re-`login` when it drops you to the sign-in page.
+- **Read the account home page, not the appointments list.** `/your-account/appointments`
+  frequently renders an empty 776-char shell in headless and never hydrates, so anything
+  that reads your current appointment must use `/your-account/` (which renders in ~1-4s and
+  also exposes `sessionDate`/`time` in its `appointment-details` link). This is the single
+  biggest source of "it worked yesterday" flakiness.
+- Sessions last ~30 days; re-`login` when it drops you to the sign-in page. Session expiry,
+  not page rendering, is the most common failure — `status` failing is the tell.
+- **Terms:** the site is protected by Queue-it + Imperva bot mitigation, so scripted access
+  is outside the letter of its terms even on your own account. Use it on your own account,
+  at your own risk, and keep the human in the decision loop (this tool does).
 
 ## License
 

@@ -338,19 +338,39 @@ async function main() {
       };
     },
     async currentAppointment() {
-      await utils.gotoAuthed(APPTS_URL);
-      let body = '';
-      for (let i = 0; i < 8; i++) {
-        await page.waitForTimeout(600);
-        body = await page.evaluate(() => document.body ? document.body.innerText : '');
-        if (/[A-Za-z]+ \d{1,2} [A-Za-z]+ \d{4}|appointments?|November|book/i.test(body) && body.length > 200) break;
+      // Account home first. The appointments LIST page very often renders an empty
+      // shell in headless (it never hydrates), whereas /your-account/ renders in
+      // ~1-4s and shows the next appointment, the portal's own "you can donate
+      // from" date, and an appointment-details link whose query string carries a
+      // machine-readable sessionDate/time. Falls back to the list page.
+      let body = '', best = null, bestD = Infinity, isoDate = '', time = '', portalEligible = '';
+      for (const route of [BASE + '/your-account/', APPTS_URL]) {
+        await utils.gotoAuthed(route);
+        body = '';
+        for (let i = 0; i < 18; i++) {
+          await page.waitForTimeout(800);
+          body = await page.evaluate(() => document.body ? document.body.innerText : '').catch(() => '');
+          if (/[A-Za-z]+ \d{1,2} [A-Za-z]+ \d{4}/.test(body)) break;
+        }
+        if (process.env.GIVEBLOOD_DEBUG) console.error('APPT_PAGE=' + JSON.stringify({ url: page.url(), len: body.length, body: body.slice(0, 1000) }));
+        const dates = [...new Set([...body.matchAll(/[A-Za-z]+ \d{1,2} [A-Za-z]+ \d{4}/g)].map(m => m[0]))];
+        for (const d of dates) { const t = parseUKDate(d); if (t && t.getTime() < bestD) { best = d; bestD = t.getTime(); } }
+        if (best) {
+          const href = await page.evaluate(() => {
+            const a = document.querySelector('a[href*="appointment-details"]');
+            return a ? a.getAttribute('href') : '';
+          }).catch(() => '');
+          const sm = /sessionDate=(\d{4}-\d{2}-\d{2})/.exec(href || '');
+          const tm = /[?&]time=T(\d{2})(\d{2})/.exec(href || '');
+          if (sm) isoDate = sm[1];
+          if (tm) { const h24 = parseInt(tm[1], 10); time = ((h24 % 12) || 12) + ':' + tm[2] + (h24 < 12 ? 'am' : 'pm'); }
+          break;
+        }
       }
-      if (process.env.GIVEBLOOD_DEBUG) console.error('APPT_PAGE=' + JSON.stringify({ url: page.url(), body: body.slice(0, 1200) }));
-      const dates = [...new Set([...body.matchAll(/[A-Za-z]+ \d{1,2} [A-Za-z]+ \d{4}/g)].map(m => m[0]))];
-      let best = null, bestD = Infinity;
-      for (const d of dates) { const t = parseUKDate(d); if (t && t.getTime() < bestD) { best = d; bestD = t.getTime(); } }
-      const timeM = /(\d{1,2}:\d{2}(?:am|pm))/i.exec(body);
-      return { date: best, time: timeM ? timeM[1].toLowerCase() : '', body: body.slice(0, 700) };
+      if (!time) { const t = /(\d{1,2}:\d{2}(?:am|pm))/i.exec(body); time = t ? t[1].toLowerCase() : ''; }
+      const pe = /You can donate from ([^\n]+)/i.exec(body);
+      if (pe) portalEligible = pe[1].trim();
+      return { date: best, time, iso: isoDate, portalEligible, body: body.slice(0, 700) };
     },
     async topSlots(town, afterDate, n) {
       // top-n earliest (date, time) slots at the nearest venue, on/after afterDate
@@ -515,7 +535,30 @@ async function main() {
               }
             }
 
-  else if (cmd === 'status' || cmd === 'check' || cmd === 'book' || cmd === 'next' || cmd === 'debug-dump' || cmd === 'walk-book' || cmd === 'probe' || cmd === 'venue' || cmd === 'cscreen' || cmd === 'review') {
+  else if (cmd === 'status') {
+    // current appointment + deferral window; --json is what the nudge watchdog reads
+    const ca = await utils.currentAppointment();
+    const apptDate = (ca.iso ? new Date(ca.iso + 'T00:00:00Z') : parseUKDate(ca.date));
+    const dur = deferralDays();
+    const eligible = apptDate ? new Date(apptDate.getTime() + dur * 86400000) : null;
+    if (JSON_OUT) {
+      process.stdout.write(JSON.stringify({
+        ok: !!apptDate, appointment: ca.date || null, time: ca.time || '',
+        appointmentISO: apptDate ? iso(apptDate) : null,
+        deferralDays: dur, eligibleISO: eligible ? iso(eligible) : null,
+        portalEligible: ca.portalEligible || '',
+      }) + '\n');
+      if (!apptDate) process.exitCode = 1;
+    } else if (!apptDate) {
+      console.log('Could not read your current appointment from the portal — the saved session may have expired. Run `giveblood login` then retry.');
+      process.exitCode = 1;
+    } else {
+      console.log('Current appointment : ' + ca.date + (ca.time ? ' ' + ca.time : ''));
+      console.log('Deferral (' + dur + ' days) : you can next give blood from ' + iso(eligible));
+    }
+  }
+
+  else if (cmd === 'check' || cmd === 'book' || cmd === 'next' || cmd === 'debug-dump' || cmd === 'walk-book' || cmd === 'probe' || cmd === 'venue' || cmd === 'cscreen' || cmd === 'review') {
     if (cmd === 'probe') await utils.gotoAuthed(BASE + (process.env.GB_ROUTE || '/your-account/appointments/book/'));
     else await utils.gotoAuthed(APPTS_URL);
   }
