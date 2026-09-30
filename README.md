@@ -59,6 +59,7 @@ GIVEBLOOD_DEFERRAL_DAYS=84
 
 ```bash
 node giveblood.mjs login          # one-time; persists ~30-day session
+node giveblood.mjs relogin        # dead-session remedy: restores a dead/expired session or confirms a live one (idempotent)
 node giveblood.mjs check          # venues near GIVEBLOOD_HOME_TOWN, nearest first + dates/times
 node giveblood.mjs check "Leeds"  # or any town/postcode
 node giveblood.mjs status         # current appointment + deferral expiry (--json for scripts)
@@ -147,6 +148,9 @@ RUN IT:   node /path/to/giveblood.mjs <cmd>
 
 Commands:
   login              authenticate once (creates the session; run if logged out)
+  relogin            THE session remedy — restores a dead/expired session (login + verify)
+                     or confirms a live one; idempotent. Run this when a command says the
+                     session died or you land back on /login.
   check [town]       venues near GIVEBLOOD_HOME_TOWN (or the given town), nearest first,
                      then the nearest venue's dates + opening hours + available times
   status             current appointment (date + time) and the deferral expiry;
@@ -199,8 +203,11 @@ RULES:
   that reads your current appointment must use `/your-account/` (which renders in ~1-4s and
   also exposes `sessionDate`/`time` in its `appointment-details` link). This is the single
   biggest source of "it worked yesterday" flakiness.
-- Sessions last ~30 days; re-`login` when it drops you to the sign-in page. Session expiry,
-  not page rendering, is the most common failure — `status` failing is the tell.
+- Sessions live ~30 days; the dead-session remedy is deterministic and idempotent:
+  `giveblood relogin` restores it (login + verify) or confirms it's still live, so the fix
+  is always the same one command. If the portal asks for a one-time security code, `relogin`
+  exits 1 and tells you to re-run with `GIVEBLOOD_OTP` set or finish the login in a browser.
+  Session expiry, not page rendering, is the most common failure — `status` failing is the tell.
 - **Terms:** the site is protected by Queue-it + Imperva bot mitigation, so scripted access
   is outside the letter of its terms even on your own account. Use it on your own account,
   at your own risk, and keep the human in the decision loop (this tool does).

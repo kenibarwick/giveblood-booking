@@ -113,7 +113,7 @@ function alertText(st) {
     `I've failed to read your appointment from the NHS portal ${st.failures} times in a row.`,
     'The saved session has most likely expired.',
     '',
-    'Fix: run `giveblood login` (needs your one-time security code if the portal asks).',
+    'Fix: run `giveblood relogin` (restores + verifies the session; needs your one-time security code only if the portal asks).',
     `Last appointment I knew about: ${st.appointment || 'unknown'}.`,
   ].join('\n');
 }

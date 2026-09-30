@@ -33,7 +33,9 @@ Two tools:
   too close.
 - ✅ **Nudge watchdog works** — hourly cron, silent unless something needs saying.
 - ✅ **Session expiry is the #1 failure mode** — the ~30-day cookie dies and every command
-  lands on `/login`. Fix is always `giveblood login` (auth 200, usually no OTP needed).
+  lands on `/login`. Remedy is deterministic and idempotent: **`giveblood relogin`** restores
+  a dead session (login + verify, reads creds from the `.env`) or confirms a live one; it is
+  exactly the fix the nudge watchdog's alert tells you to run. (A plain `login` also works.)
 - ⚠️ **SPA quirk (important, cost real debugging time):** the *appointments list* page
   (`/your-account/appointments`) routinely renders an empty 776-char shell in headless and
   **never hydrates** — it will not produce the appointment no matter how long you wait. The
@@ -47,6 +49,9 @@ Two tools:
 
 ```
 giveblood login                     # authenticate + persist the session cookie
+giveblood relogin                   # THE dead-session remedy: restores a dead/expired session
+                                     # (login + verify), or confirms a live one. Idempotent. Exit 1
+                                     # with a hint if an OTP/security-code prompt blocks it.
 giveblood check [town]              # venues near town nearest-first + nearest venue's dates/times
 giveblood status                    # current appointment + deferral expiry (--json for scripts)
 giveblood next                      # current appointment -> eligible date -> top-3 eligible slots

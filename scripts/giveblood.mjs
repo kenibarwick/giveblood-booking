@@ -7,6 +7,7 @@
  *
  * Usage:
  *   giveblood login                         authenticate + persist session cookie
+ *   giveblood relogin                       restore a dead/expired session: login + verify (the "session died" remedy)
  *   giveblood check                         print next available slots (plain text / --json)
  *   giveblood book <slot-ref|"datetime">    book/reschedule a slot
  *   giveblood status                        print current appointment + eligibility
@@ -450,6 +451,39 @@ async function main() {
     const cookies = await browser.cookies(BASE).catch(() => []);
     info({ ok: true, url: page.url(), authed: !page.url().includes('/login'), cookieCount: cookies.length,
            cookies: cookies.map(c => c.name), auth: authResp && authResp.status }, 'login run -> ' + page.url() + '  [' + cookies.length + ' cookies]');
+  }
+
+  else if (cmd === 'relogin') {
+    // Deterministic remedy for a dead/expired session: authenticate, then verify the
+    // new session can actually read your appointment. Exit 1 with a clear message if
+    // an OTP/security-code prompt blocks it (re-run with GIVEBLOOD_OTP set or finish in
+    // a browser). This is the one command to run whenever a run lands back on /login.
+    await page.goto(BASE + '/your-account/', { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(4000);
+    // Only authenticate if we really are logged out — if the session is already healthy
+    // the login page redirects past /login (no email field appears) and login() would
+    // time out. This makes `relogin` idempotent: it restores a dead session OR confirms
+    // a live one.
+    if (page.url().includes('/login')) await utils.login();
+    const ca = await utils.currentAppointment();
+    const apptDate = (ca.iso ? new Date(ca.iso + 'T00:00:00Z') : parseUKDate(ca.date));
+    const dur = deferralDays();
+    const eligible = apptDate ? new Date(apptDate.getTime() + dur * 86400000) : null;
+    if (JSON_OUT) {
+      process.stdout.write(JSON.stringify({
+        ok: !!apptDate, appointment: ca.date || null, time: ca.time || '',
+        appointmentISO: apptDate ? iso(apptDate) : null,
+        deferralDays: dur, eligibleISO: eligible ? iso(eligible) : null,
+      }) + '\n');
+    } else if (apptDate) {
+      console.log('Session restored ✓');
+      console.log('Appointment : ' + ca.date + (ca.time ? ' ' + ca.time : ''));
+      console.log('Eligible (deferral ' + dur + ' days) : from ' + iso(eligible));
+    } else {
+      console.log('Re-login did not restore the session — an OTP/security-code prompt is most likely blocking it.');
+      console.log('Re-run with GIVEBLOOD_OTP set, or complete the login once in a real browser.');
+    }
+    if (!apptDate) process.exitCode = 1;
   }
 
   else if (cmd === 'check') {
