@@ -10,6 +10,14 @@
  *      appointment has passed: "did you give blood? (y/n)"
  *   2. a one-off alert if the portal read keeps failing (session likely expired)
  *
+ * SELF-HEALING: the session cookie expires about every 30 days, so a "blind"
+ * watchdog is the normal state of affairs every month, not an incident. Rather
+ * than shout at the human, the watchdog now repairs itself: after
+ * FAIL_RELOGIN_AFTER consecutive failures it runs `giveblood.mjs relogin`
+ * unattended, which is safe because that command is idempotent and only ever
+ * prompts when the portal itself demands an OTP. Only if the unattended repair
+ * genuinely cannot work does it alert. The human is told what was tried.
+ *
  * The appointment is read from the portal via `giveblood.mjs status --json` and
  * cached in ~/.config/giveblood/nudge-state.json, so frequent ticks do NOT hammer
  * the bot-guarded portal. A live read only happens when it matters: no cached
@@ -41,13 +49,18 @@ const HOME = process.env.HOME || '/home/keni';
 const CFG = `${HOME}/.config/giveblood`;
 const STATE_PATH = `${CFG}/nudge-state.json`;
 const HERE = dirname(fileURLToPath(import.meta.url));
-const CLI = join(HERE, 'giveblood.mjs');
+// GIVEBLOOD_CLI lets a test point at a fake CLI without copying this file next
+// to it. Unset in normal use, where the CLI is always the sibling giveblood.mjs.
+const CLI = process.env.GIVEBLOOD_CLI || join(HERE, 'giveblood.mjs');
 
 const AFTER_MIN = parseInt(process.env.GIVEBLOOD_NUDGE_AFTER_MIN || '30', 10);
 const REFRESH_MAX_AGE_MS = 7 * 86400000;      // re-read the portal at least weekly
 const READ_TIMEOUT_MS = 240000;               // portal read can be slow on a bad day
 const FAIL_ALERT_AFTER = 6;                   // consecutive failures before we shout
 const FAIL_ALERT_COOLDOWN_MS = 7 * 86400000;  // ...and at most once a week
+const FAIL_RELOGIN_AFTER = 3;                  // failures before we TRY to heal ourselves
+const RELOGIN_COOLDOWN_MS = 6 * 3600000;       // no more than one relogin attempt per 6h
+const RELOGIN_TIMEOUT_MS = 300000;             // relogin drives a real browser; be patient
 
 const DEBUG = !!process.env.GIVEBLOOD_DEBUG;
 const NO_READ = !!process.env.GIVEBLOOD_NUDGE_NO_READ;   // test/offline: trust the cached state, skip the portal read
@@ -90,6 +103,34 @@ function readPortal() {
   return JSON.parse(line);
 }
 
+/* ---------- self-heal: expired session cookie ---------- */
+
+// The cookie lasts ~30 days, so expiry is routine. `relogin` is idempotent: it
+// authenticates only if the browser actually landed on /login, otherwise it
+// simply confirms the live session. It never blocks on stdin, so it is safe
+// under cron where there is no TTY. If the portal demands an OTP it exits 1
+// with a clear message instead of hanging, which is the one case we must tell a
+// human about.
+function tryRelogin() {
+  try {
+    const out = execFileSync('node', [CLI, 'relogin'], {
+      timeout: RELOGIN_TIMEOUT_MS, encoding: 'utf8', env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const txt = String(out);
+    const ok = /Session restored/.test(txt);
+    log('relogin ' + (ok ? 'succeeded' : 'ran but did not confirm'));
+    return { ok, why: ok ? null : txt.trim().split('\n').filter(Boolean).slice(-1)[0] || 'no confirmation' };
+  } catch (e) {
+    const msg = (e.stdout && String(e.stdout).trim()) || (e.stderr && String(e.stderr).trim()) || (e.message || String(e));
+    // Exit 1 from relogin specifically means an OTP/security-code prompt is
+    // blocking it. That is the one outcome a human must resolve.
+    const otp = /OTP|security code|did not restore/i.test(msg);
+    log('relogin failed' + (otp ? ' (OTP-blocked)' : ''));
+    return { ok: false, otp, why: msg.split('\n').filter(Boolean).slice(-1)[0] || 'relogin failed' };
+  }
+}
+
 /* ---------- output ---------- */
 
 function nudgeText(st) {
@@ -107,15 +148,29 @@ function nudgeText(st) {
 }
 
 function alertText(st) {
-  return [
-    '🩸 Blood donation nudge is blind',
+  const lines = [
+    '🩸 Blood donation nudge needs you',
     '',
     `I've failed to read your appointment from the NHS portal ${st.failures} times in a row.`,
-    'The saved session has most likely expired.',
-    '',
-    'Fix: run `giveblood relogin` (restores + verifies the session; needs your one-time security code only if the portal asks).',
-    `Last appointment I knew about: ${st.appointment || 'unknown'}.`,
-  ].join('\n');
+  ];
+  if (st.healAttempts) {
+    lines.push(
+      `I tried repairing the expired session myself ${st.healAttempts} time(s) and it did not take.`,
+    );
+  }
+  if (st.lastHealOtp) {
+    lines.push(
+      'The portal is asking for a one-time security code, which I cannot answer for you.',
+      'Run `giveblood relogin` and enter the code when prompted — that is the only manual step.',
+    );
+  } else {
+    lines.push(
+      'Fix: run `giveblood relogin` (restores + verifies the session; needs your',
+      'one-time security code only if the portal asks).',
+    );
+  }
+  lines.push('', `Last appointment I knew about: ${st.appointment || 'unknown'}.`);
+  return lines.join('\n');
 }
 
 /* ---------- tick ---------- */
@@ -128,23 +183,47 @@ function tick() {
   const needRefresh = !s.appointmentISO || stale || (inWindow && s.askedFor !== s.appointmentISO);
 
   if (needRefresh && !NO_READ) {
-    try {
-      const r = readPortal();
-      if (r && r.ok && r.appointmentISO) {
-        s.appointment = r.appointment;
-        s.appointmentTime = r.time || '';
-        s.appointmentISO = r.appointmentISO;
-        s.deferralDays = r.deferralDays || 84;
-        s.readAt = now;
-        s.failures = 0;
-        log('read ok: ' + s.appointmentISO + ' ' + s.appointmentTime);
-      } else {
+    const attempt = () => {
+      try {
+        const r = readPortal();
+        if (r && r.ok && r.appointmentISO) {
+          s.appointment = r.appointment;
+          s.appointmentTime = r.time || '';
+          s.appointmentISO = r.appointmentISO;
+          s.deferralDays = r.deferralDays || 84;
+          s.readAt = now;
+          s.failures = 0;
+          s.healAttempts = 0;
+          s.lastHealOtp = false;
+          s.lastHealAt = 0;
+          log('read ok: ' + s.appointmentISO + ' ' + s.appointmentTime);
+          return true;
+        }
         s.failures = (s.failures || 0) + 1;
         log('read returned no appointment (failure ' + s.failures + ')');
+      } catch (e) {
+        s.failures = (s.failures || 0) + 1;
+        log('read failed (failure ' + s.failures + '): ' + (e.message || e));
       }
-    } catch (e) {
-      s.failures = (s.failures || 0) + 1;
-      log('read failed (failure ' + s.failures + '): ' + (e.message || e));
+      return false;
+    };
+
+    if (!attempt() &&
+        (s.failures || 0) >= FAIL_RELOGIN_AFTER &&
+        (now - (s.lastHealAt || 0)) > RELOGIN_COOLDOWN_MS) {
+      // Enough consecutive failures look like a dead session rather than a bad
+      // day. Repair it here instead of escalating to the human, then read again.
+      s.lastHealAt = now;
+      s.healAttempts = (s.healAttempts || 0) + 1;
+      const heal = tryRelogin();
+      if (heal.ok) {
+        log('self-heal ok, retrying the read immediately');
+        attempt();
+      } else {
+        s.lastHealOtp = !!heal.otp;
+        s.lastHealWhy = heal.why;
+        log('self-heal failed: ' + heal.why);
+      }
     }
   }
 

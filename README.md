@@ -70,6 +70,7 @@ node giveblood.mjs book --confirm # actually books the shown time (REAL change t
 
 Extra:
 - `GB_TIME="5:30pm"` — pick a specific time slot for `book`.
+- `GB_DATE="5 Feb 2027"` — pick a specific date row on the choose-date screen for `book` (without it the wizard takes the earliest date; pin both to book a later slot).
 - `--json` — structured output for scripts.
 
 ### Bare-metal terminal example

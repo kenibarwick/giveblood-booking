@@ -59,7 +59,7 @@ giveblood book [town]               # dry-run: reach the review screen, New vs E
 giveblood book [town] --confirm     # book the shown time (REAL appointment change — use explicitly)
 ```
 
-Extra: `GB_TIME="5:30pm"` picks a specific slot for `book`. `GIVEBLOOD_HOME_TOWN` in
+Extra: `GB_TIME="5:30pm"` picks a specific slot for `book`; `GB_DATE="5 Feb 2027"` picks a specific date row on choose-date (without it the wizard clicks the EARLIEST date — booking a later slot needs both). `status` reads the home page, which only shows the NEXT appointment — after booking ahead, verify on `/your-account/appointments/your-appointments/` (renders fine when navigated from the home page). `GIVEBLOOD_HOME_TOWN` in
 `~/.config/giveblood/.env` (default `Bedford`). `--json` for structured output.
 
 ## The nudge watchdog
