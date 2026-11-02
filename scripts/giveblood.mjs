@@ -294,7 +294,23 @@ async function main() {
       await page.waitForTimeout(1200);
       const vCard = page.locator('a[href*="choose-date"]').first();
       if (await vCard.count()) { await vCard.click(); await page.waitForTimeout(2400); }
-      const dt = page.locator('a[href*="choose-appointment"]').first();
+      // GB_DATE: pick the matching date row (text like "Fri 5 Feb 2027"); else earliest
+      const wantDate = (process.env.GB_DATE || '').toLowerCase();
+      let dt;
+      if (wantDate) {
+        const rows = page.locator('a[href*="choose-appointment"]');
+        const n = await rows.count();
+        dt = rows.first();
+        const wantNum = (wantDate.match(/\d+/) || [])[0] || '';
+        const wantMon = (wantDate.replace(/.*\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b.*/, '$1'));
+        for (let i = 0; i < n; i++) {
+          const t = ((await rows.nth(i).innerText().catch(() => '')) || '') + ' ' + ((await rows.nth(i).getAttribute('href')) || '');
+          const tl = t.toLowerCase();
+          if (wantMon && tl.includes(wantMon) && (!wantNum || new RegExp('\\b' + wantNum + '\\b').test(tl))) { dt = rows.nth(i); break; }
+        }
+      } else {
+        dt = page.locator('a[href*="choose-appointment"]').first();
+      }
       if (await dt.count()) { await dt.click(); await page.waitForTimeout(2400); }
       // pick a slot (default earliest); expand accordion until one is visible, then click in-flow
       let clickedSlot = false;
